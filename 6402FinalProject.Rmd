@@ -1,0 +1,198 @@
+---
+title: "6402 Final Project"
+output: html_notebook
+---
+
+```{r}
+library(mgcv)
+library(TSA)
+library(dynlm)
+library(ggplot2)
+library(reshape2)
+library(greybox)
+library(mlr)
+library(mgcv)
+library(lubridate)
+library(dplyr)
+library(data.table)
+home_data <- read.csv("~/Downloads/Homeownership Rate in the United States.csv", head = TRUE)
+income_data <- read.csv("~/Downloads/Real Disposable Personal Income.csv", head = TRUE)
+
+home_prices <- read.csv("~/Downloads/CSUSHPINSA.csv", head = TRUE)
+lumber_prices <- read.csv("~/Downloads/WPU081.csv", head = TRUE)
+interest_rates <- read.csv("~/Downloads/FEDFUNDS.csv", head = TRUE)
+
+home_dates <- as.Date(home_data$DATE, "%m/%d/%y")
+income_dates <- as.Date(income_data$DATE, "%m/%d/%y")
+home_data$DATE <- home_dates
+income_data$DATE <- income_dates
+
+home_ts <- ts(home_data$RHORUSQ156N,start = 1987, frequency = 4)
+income_ts <- ts(income_data$Personal.Income, start = 1987, frequency = 12)
+plot(home_ts, col = "red",  ylab = "Home Ownership Percantage", xlab = "Year")
+plot(income_ts, col = "blue", ylab = "Real Disposable Income", xlab = "Year")
+
+
+```
+
+```{r}
+plot(home_ts, col = "black",  ylab = "Home Ownership Percantage", xlab = "Year")
+president = list(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
+
+for (i in 1:length(president)) {
+  if (president[i] == 1) {
+    rect(1987 + (i/4) - 1/4, 62,1987+ (i/4), 70, col = rgb(1, 0, 0, 0.2), border = NA)
+  }
+    if (president[i] == 0) {
+    rect(1987 + (i/4) - 1/4, 62,1987+ (i/4), 70, col = rgb(.2 ,.2, 1, 0.2), border = NA)
+  }
+  
+lines(home_ts, col= 'black')
+}
+```
+
+```{r}
+acf(home_ts, lag.max = 12*4, main="Home Ownership ACF Plot")
+acf(income_ts, lag.max = 12*12, main = "Real Income ACF Plot")
+```
+
+```{r}
+time.pts = c(1:length(home_ts))
+time.pts = c(time.pts - min(time.pts))/max(time.pts)
+
+# Moving average
+mav.home_ts<-ksmooth(time.pts,home_ts,kernel="box")
+tsmav.home_ts<-ts(mav.home_ts$y,frequency=4,start=1987)
+
+#Local Polynomial
+loc.home_ts = loess(home_ts~time.pts)
+fit.loc.home_ts = ts(fitted(loc.home_ts),frequency=4,start=1987)
+
+# Splines
+spl.home_ts<-gam(home_ts~s(time.pts))
+fit.spl<-ts(fitted(spl.home_ts),frequency=4,start=1987)
+
+#Parametric quadratic polynomial
+x1 <- time.pts
+x2 <- time.pts^2
+para.model <- lm(home_ts ~ x1 + x2)
+para.fit <- ts(fitted(para.model), frequency=4,start=1987)
+
+ts.plot(home_ts,ylab="Home Ownership",main="Home Ownership with Trend Estimations")
+lines(tsmav.home_ts,lwd=2,col="plum")
+lines(fit.loc.home_ts,lwd=2,col="purple")
+lines(fit.spl,lwd=2,col="green")
+lines(para.fit,lwd=2,col="blue")
+legend(x=2010,y=6000,legend=c("Moving Average","LOESS", "Splines", "Parametric quadratic"),
+       lty = 1, lwd=2, col=c("plum","purple", "green", "blue"))
+
+```
+
+```{r}
+time.pts = c(1:length(income_ts))
+time.pts = c(time.pts - min(time.pts))/max(time.pts)
+
+# Moving average
+mav.income_ts<-ksmooth(time.pts,income_ts,kernel="box")
+tsmav.income_ts<-ts(mav.income_ts$y,frequency=12,start=1987)
+
+#Local Polynomial
+loc.income_ts = loess(income_ts~time.pts)
+fit.loc.income_ts = ts(fitted(loc.income_ts),frequency=12,start=1987)
+
+# Splines
+spl.income_ts<-gam(income_ts~s(time.pts))
+fit.spl<-ts(fitted(spl.income_ts),frequency=12,start=1987)
+
+#Parametric quadratic polynomial
+x1 <- time.pts
+x2 <- time.pts^2
+para.model <- lm(income_ts ~ x1 + x2)
+para.fit <- ts(fitted(para.model), frequency=12,start=1987)
+
+ts.plot(income_ts,ylab="Real Income",main="Real Income with Trend Estimations")
+lines(tsmav.income_ts,lwd=2,col="plum")
+lines(fit.loc.income_ts,lwd=2,col="purple")
+lines(fit.spl,lwd=2,col="green")
+lines(para.fit,lwd=2,col="blue")
+legend(x=2010,y=6000,legend=c("Moving Average","LOESS", "Splines", "Parametric quadratic"),
+       lty = 1, lwd=2, col=c("plum","purple", "green", "blue"))
+
+```
+
+```{r}
+
+time.pts = c(1:length(home_ts))
+time.pts = c(time.pts - min(time.pts))/max(time.pts)
+x1 = time.pts
+x2 = time.pts^2
+lm.fit = dynlm(home_ts~x1+x2+season(home_ts))
+lm.ts = ts(fitted(lm.fit, start = 1987, frequency = 4))
+
+gam.fit = gam(home_ts~s(time.pts)+season(home_ts))
+gam_ts = ts(fitted(gam.fit),start=1987,frequency=4)
+
+plot(home_ts, col = "red",  ylab = "Home Ownership Percantage", xlab = "Year")
+lines(gam_ts, col= "blue")
+
+```
+```{r}
+home_ts_train = home_ts[1:(length(home_ts) - 22)]
+
+diff_home_year = diff(home_ts, 4)
+acf(diff_home_year, lag.max = 24)
+diff_home_year_train = diff(home_ts, 4)
+acf(diff_home_year_train, lag.max= 24)
+diff_four_years = diff(home_ts, 40)
+acf(diff_four_years, lag.max = 24)
+
+
+n <- length(diff_home_year_train)
+p <- 0:6
+q <- 0:6
+aic <- matrix(0, length(p), length(q)) 
+for (i in 1:length(p)) {
+  for (j in 1:length(q)) {
+    modij = arima(diff_home_year_train, order = c(p[i], 0, q[j]), method = 'ML', include.mean = FALSE)
+    aic[i, j] = modij$aic + 2 * (p[i] + q[j] + 1) * (p[i] + q[i]) / (n - p[i] - q[j] - 1)
+  }
+}
+
+js <- ceiling(which.min(aic) / length(p))
+is <- which.min(aic) - (js-1)*length(p)
+
+
+aic_df <- melt(aic)
+colnames(aic_df) <- c("P_Order", "Q_Order", "value")
+ggplot(aic_df, aes(P_Order, Q_Order, fill = value)) +
+  geom_tile(color = NA) +  # Removes grid lines
+  scale_fill_gradient(low = "blue", high = "red", name = "Intensity") +  # Legend title
+  labs(title = "Heatmap from Matrix") +
+  theme_minimal()
+
+
+model2 <- arima(home_ts_train, order = c(0,0,3), method = "ML", include.mean = FALSE)
+model2
+
+
+
+```
+
+
+```{r}
+
+cat("Generalized Additive Model  MAPE:", mean(abs(gam_ts-home_ts)/home_ts))
+
+cat("Generalized Additive Model  MAPE:", mean(abs(gam_ts-home_ts)/home_ts))
+
+
+pred_vals <- predict(model2, n.ahead = 22)
+pred_ts <- ts(pred_vals$pred, start = 2019, frequency = 4)
+plot(home_ts, col = "red",  ylab = "Home Ownership Percantage", xlab = "Year")
+points(pred_ts, col = 'blue', lwd=2)
+```
+
+
+
+
+
