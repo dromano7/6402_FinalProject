@@ -1,0 +1,266 @@
+---
+title: "Project Analysis"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-03-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set( message=FALSE, warning=FALSE, echo=FALSE)
+```
+
+# Exploratory Analysis
+
+## Are there specific characteristics of the time series representing disposable income that contribute most to the predictability of the time series?
+
+To begin our analysis, we will examine the disposable personal income time series data as well as its ACF plot.
+
+```{r}
+# Load necessary libraries
+library(tidyverse)
+library(lubridate)
+library(forecast)
+library(tseries)
+library(TTR)
+library(mgcv)
+
+# Load Data
+income_data <- read.csv("Real Disposable Personal Income.csv", stringsAsFactors = FALSE)
+income_data$DATE <- as.Date(income_data$DATE, format="%m/%d/%y")
+colnames(income_data) <- c("Date", "Personal_Income")
+
+# Convert to time series format
+income_ts <- ts(income_data$Personal_Income, start = c(1987,1), frequency = 12)
+
+# Plot the Time Series
+plot(income_ts, col="blue", lwd=1.5, ylab="Income", main="Disposable Income Time Series")
+
+# ACF Plot
+acf(income_ts, lag.max=12*10, col="blue", lwd=1.5, main="ACF of Disposable Income")
+```
+We can see that there is a clear upward trend indicating the data is non-stationary. More specifically, the mean is changing over time, which violates one of the assumptions of stationarity. There a sharp spikes sen in the series indicating a potential external shock, which in this case aligns with what we know to be the COVID-19 pandemic. 
+
+Looking at the ACF plot, we see that the ACF plot do not sharply drop to zero, as we would expect in a stationary series. This tells us that the past income values strongly influence future income values, which intuitively lines up with what we would expect. 
+
+We can confirm non stationarity using a formal Augmented Dickey-Fuller (ADF) test below:
+```{r}
+# Perform Augmented Dickey-Fuller (ADF) Test
+adf_test <- adf.test(income_ts)
+
+# Print Results
+print(adf_test)
+```
+As expected, we see a p-value well above 0.05, indicating the series is non-stationary and will need differencing if it is to be fit to an ARIMA model. Before this, we will evaluate the fit of Moving Average, LOESS, Splines, and Quadratic Polynomial models.
+
+```{r}
+# Normalize time index (as in HW2)
+time.pts <- c(1:length(income_ts))
+time.pts <- (time.pts - min(time.pts)) / max(time.pts)
+
+# ---- Trend Estimation ---- #
+# Moving Average (using kernel smoothing)
+mav.income <- ksmooth(time.pts, income_ts, kernel="box")
+tsmav.income <- ts(mav.income$y, frequency=12, start=1987)
+
+# Local Polynomial (LOESS)
+loc.income <- loess(income_ts ~ time.pts)
+fit.loc.income <- ts(fitted(loc.income), frequency=12, start=1987)
+
+# Splines
+spl.income <- gam(income_ts ~ s(time.pts))
+fit.spl.income <- ts(fitted(spl.income), frequency=12, start=1987)
+
+# Parametric Quadratic Polynomial
+x1 <- time.pts
+x2 <- time.pts^2
+para.model <- lm(income_ts ~ x1 + x2)
+para.fit <- ts(fitted(para.model), frequency=12, start=1987)
+
+# ---- Plot All Trend Models on the Same Graph ---- #
+ts.plot(income_ts, ylab="Disposable Income", main="Disposable Income with Trend Estimations", col="black", lwd=1.5)
+lines(tsmav.income, lwd=2, col="plum")    # Moving Average
+lines(fit.loc.income, lwd=2, col="purple") # Local Polynomial
+lines(fit.spl.income, lwd=2, col="green")  # Splines
+lines(para.fit, lwd=2, col="blue")         # Parametric Quadratic
+
+legend("topleft", legend=c("Original Data", "Moving Average", "LOESS", "Splines", "Parametric Quadratic"),
+       col=c("black", "plum", "purple", "green", "blue"), lty=1, lwd=2)
+```
+The models generally appear to fit the data well, but fails to capture sudden shocks. In this case, the SPLINES model appears to follow the data best. Next, we will examine the residuals of the models.
+
+```{r}
+# Compute Residuals (Ensure Same Lengths)
+resid_mav <- income_ts - tsmav.income
+resid_poly <- income_ts - para.fit
+resid_loc <- income_ts - fit.loc.income
+resid_spline <- income_ts - fit.spl.income
+
+# ---- Plot Residuals ---- #
+par(mfrow=c(2,2))
+plot(resid_mav, col="purple", main="Residuals: Moving Average", ylab="Residuals")
+plot(resid_poly, col="orange", main="Residuals: Quadratic Polynomial", ylab="Residuals")
+plot(resid_loc, col="yellow", main="Residuals: Local Polynomial", ylab="Residuals")
+plot(resid_spline, col="green", main="Residuals: Splines", ylab="Residuals")
+par(mfrow=c(1,1))
+
+# ---- ACF of Residuals ---- #
+acf(resid_mav, main="ACF: Moving Average Residuals")
+acf(resid_poly, main="ACF: Quadratic Poly Residuals")
+acf(resid_loc, main="ACF: Local Polynomial Residuals")
+acf(resid_spline, main="ACF: Splines Residuals")
+```
+
+All four residual plots are showing large spikes around 2020, which suggests that none of the trend models were able to fully capture the shock effect. This shock is likely due to the COVID-19 pandemic. Out of the different models selected the Local Polynomial and Splines models appear to be the most stable, but in order to better explain the variations in income, we will likely need a different model such as ARIMA or SARIMA time series models.
+
+In order to remove trend, we will perform first-order differncing.
+
+```{r}
+income_diff <- diff(income_ts)
+
+# Plot Differenced Series
+plot(income_diff, col="blue", main="First-Order Differenced Disposable Income")
+
+# ACF of Differenced Data
+acf(income_diff, main="ACF of Differenced Disposable Income")
+
+# Re-run ADF Test
+adf_test_diff <- adf.test(income_diff)
+print(adf_test_diff)
+```
+After performing first-order differencing, we can visually see the trend has been removed from the series. The ADF confirms that the series is not stationary given the p-value of 0.01 is less than 0.05. 
+
+Before fitting an ARIMA model, we will check AR(p) and MA(q) terms using the PACF and ACF plots of the differenced series. If the PACF plot cuts off after lag k we will suggest an AR(p) model, if the ACF plot cuts off after lag m we will suggest an MA(q) model, and if both the ACF and PACF plot tail off we will suggest an ARMA model.
+
+```{r}
+# ACF and PACF plots of differenced series
+acf(income_diff, main="ACF of Differenced Disposable Income")
+pacf(income_diff, main="PACF of Differenced Disposable Income")
+```
+
+Examining the ACF plot, we see that the spikes drop off quickly to near zero after lag 1, suggesting we may want to use q = 1 (MA(1)). The PACF shows a significant spike at lag 1 and then also has some drop off, so we will use a value of p = 1 (AR(1)).
+
+Based on these plots, we will start with an ARIMA model ARIMA(1,1,1)(p=1, d=1, q=1).
+
+```{r}
+# Define search space for p, d, q
+p_values <- 0:3  # AR terms
+d_values <- 1    # Differencing order (we already determined d=1)
+q_values <- 0:3  # MA terms
+
+# Initialize best model tracking
+best_model <- NULL
+best_aic <- Inf  # Start with a high AIC value
+best_params <- c(NA, NA, NA)
+
+# Loop through all (p,d,q) combinations
+for (p in p_values) {
+  for (q in q_values) {
+    model <- tryCatch({
+      arima(income_ts, order=c(p, d_values, q))
+    }, error = function(e) NULL)  # Handle potential errors
+
+    # If model fits successfully and has a lower AIC, update best model
+    if (!is.null(model) && AIC(model) < best_aic) {
+      best_aic <- AIC(model)
+      best_model <- model
+      best_params <- c(p, d_values, q)
+    }
+  }
+}
+
+# Display the best model
+cat("Best Manual ARIMA Model: ARIMA(", best_params[1], ",", best_params[2], ",", best_params[3], ")\n")
+print(summary(best_model))
+```
+
+```{r}
+# Extract residuals
+residuals_manual <- residuals(best_model)
+
+# Compute error metrics
+rmse <- sqrt(mean(residuals_manual^2, na.rm=TRUE))  # Root Mean Squared Error
+mae <- mean(abs(residuals_manual), na.rm=TRUE)  # Mean Absolute Error
+mape <- mean(abs(residuals_manual / income_ts), na.rm=TRUE) * 100  # Mean Absolute Percentage Error
+
+# Print error measures
+cat("Manual RMSE:", rmse, "\n")
+cat("Manual MAE:", mae, "\n")
+cat("Manual MAPE:", mape, "%\n")
+
+final_arima <- best_model
+```
+```{r}
+# Number of future time steps to forecast
+h <- 24  # Forecasting for the next 24 months (2 years)
+
+# Create forecast manually using predict()
+forecast_values <- predict(final_arima, n.ahead=h)
+
+# Extract predicted values and standard errors
+predicted_values <- forecast_values$pred
+lower_bound <- predicted_values - 1.96 * forecast_values$se  # 95% confidence interval lower bound
+upper_bound <- predicted_values + 1.96 * forecast_values$se  # 95% confidence interval upper bound
+
+# Create time axis for forecasted values
+forecast_time <- seq(from=end(income_ts)[1] + 1/12, length.out=h, by=1/12)
+
+# Plot original data
+plot(income_ts, type="l", col="blue", lwd=2, xlim=c(start(income_ts)[1], end(income_ts)[1] + h/12),
+     ylim=c(min(lower_bound, income_ts), max(upper_bound, income_ts)), ylab="Disposable Income", xlab="Time",
+     main="ARIMA(2,1,3) Forecast for Disposable Income")
+
+# Add forecasted values
+lines(forecast_time, predicted_values, col="red", lwd=2)
+
+# Add confidence intervals
+lines(forecast_time, lower_bound, col="gray", lty=2)
+lines(forecast_time, upper_bound, col="gray", lty=2)
+
+# Add legend
+legend("topleft", legend=c("Actual Data", "Forecast", "95% Confidence Interval"),
+       col=c("blue", "red", "gray"), lty=c(1,1,2), lwd=c(2,2,1))
+```
+
+```{r}
+# Create a time trend variable to represent drift
+time_trend <- 1:length(income_ts)
+
+# Fit ARIMA(2,1,3) with Drift (using xreg)
+final_arima_drift <- arima(income_ts, order=c(2,1,3), xreg=time_trend)
+
+# Define forecast horizon
+h <- 24  # Forecast 24 months ahead
+
+# Create time trend for future points
+future_time_trend <- (length(income_ts) + 1):(length(income_ts) + h)
+
+# Create forecast manually
+forecast_values <- predict(final_arima_drift, n.ahead=h, newxreg=future_time_trend)
+
+# Extract predicted values and confidence intervals
+predicted_values <- forecast_values$pred
+lower_bound <- predicted_values - 1.96 * forecast_values$se
+upper_bound <- predicted_values + 1.96 * forecast_values$se
+
+# Create time axis for forecasted values
+forecast_time <- seq(from=end(income_ts)[1] + 1/12, length.out=h, by=1/12)
+
+# Plot original data
+plot(income_ts, type="l", col="blue", lwd=2, xlim=c(start(income_ts)[1], end(income_ts)[1] + h/12),
+     ylim=c(min(lower_bound, income_ts), max(upper_bound, income_ts)), ylab="Disposable Income", xlab="Time",
+     main="ARIMA(2,1,3) Forecast with Drift")
+
+# Add forecasted values
+lines(forecast_time, predicted_values, col="red", lwd=2)
+
+# Add confidence intervals
+lines(forecast_time, lower_bound, col="gray", lty=2)
+lines(forecast_time, upper_bound, col="gray", lty=2)
+
+# Add legend
+legend("topleft", legend=c("Actual Data", "Forecast with Drift", "95% Confidence Interval"),
+       col=c("blue", "red", "gray"), lty=c(1,1,2), lwd=c(2,2,1))
+
+```
+
