@@ -102,13 +102,14 @@ plot(resid_mav, col="purple", main="Residuals: Moving Average", ylab="Residuals"
 plot(resid_poly, col="orange", main="Residuals: Quadratic Polynomial", ylab="Residuals")
 plot(resid_loc, col="yellow", main="Residuals: Local Polynomial", ylab="Residuals")
 plot(resid_spline, col="green", main="Residuals: Splines", ylab="Residuals")
-par(mfrow=c(1,1))
 
 # ---- ACF of Residuals ---- #
+par(mfrow=c(2,2))
 acf(resid_mav, main="ACF: Moving Average Residuals")
 acf(resid_poly, main="ACF: Quadratic Poly Residuals")
 acf(resid_loc, main="ACF: Local Polynomial Residuals")
 acf(resid_spline, main="ACF: Splines Residuals")
+par(mfrow=c(1,1))
 ```
 
 All four residual plots are showing large spikes around 2020, which suggests that none of the trend models were able to fully capture the shock effect. This shock is likely due to the COVID-19 pandemic. Out of the different models selected the Local Polynomial and Splines models appear to be the most stable, but in order to better explain the variations in income, we will likely need a different model such as ARIMA or SARIMA time series models.
@@ -263,4 +264,284 @@ legend("topleft", legend=c("Actual Data", "Forecast with Drift", "95% Confidence
        col=c("blue", "red", "gray"), lty=c(1,1,2), lwd=c(2,2,1))
 
 ```
+```{r}
+library(FinTS)
 
+# Square the residuals from the ARIMA model
+squared_resid <- residuals(final_arima)^2
+
+# Plot ACF of squared residuals
+acf(squared_resid, main="ACF of Squared Residuals (ARIMA Model)")
+
+# Ljung-Box test on squared residuals
+box_test <- Box.test(squared_resid, lag = 12, type = "Ljung-Box")
+cat("Ljung-Box Test on Squared Residuals:\n")
+print(box_test)
+
+# Perform ARCH LM Test
+arch_test <- ArchTest(residuals(final_arima), lags = 12)
+cat("ARCH Test:\n")
+print(arch_test)
+```
+
+```{r}
+# Step 1: Fix ARIMA(2,1,3), search GARCH(m,n) using BIC
+test_garch_orders <- function(m, n) {
+  spec <- ugarchspec(
+    variance.model = list(garchOrder = c(m, n)),
+    mean.model = list(armaOrder = c(2, 3), include.mean = TRUE),
+    distribution.model = "std"
+  )
+  
+  fit <- tryCatch({
+    ugarchfit(spec, data = income_ts, solver = "hybrid")
+  }, error = function(e) NULL)
+  
+  if (!is.null(fit)) {
+    bic <- infocriteria(fit)[2]
+    return(data.frame(m = m, n = n, BIC = bic, fit = I(list(fit))))
+  } else {
+    return(NULL)
+  }
+}
+
+# Grid search over GARCH orders
+garch_results <- data.frame(m = numeric(), n = numeric(), BIC = numeric(), fit = I(list()))
+
+for (m in 0:3) {
+  for (n in 0:3) {
+    res <- test_garch_orders(m, n)
+    if (!is.null(res)) {
+      garch_results <- rbind(garch_results, res)
+    }
+  }
+}
+
+# Select best GARCH order
+garch_results <- garch_results[order(garch_results$BIC), ]
+best_garch_order <- garch_results[1, c("m", "n")]
+cat("Best GARCH order with fixed ARIMA(2,1,3): GARCH(", best_garch_order$m, ",", best_garch_order$n, ")\n")
+```
+
+```{r}
+# Step 2: Fix best GARCH(m,n), optimize ARIMA(p,q)
+test_arima_with_garch <- function(p, q) {
+  spec <- ugarchspec(
+    variance.model = list(garchOrder = c(1, 0)),
+    mean.model = list(armaOrder = c(p, q), include.mean = TRUE),
+    distribution.model = "std"
+  )
+  
+  fit <- tryCatch({
+    ugarchfit(spec, data = income_ts, solver = "hybrid")
+  }, error = function(e) NULL)
+  
+  if (!is.null(fit)) {
+    bic <- infocriteria(fit)[2]
+    return(data.frame(p = p, q = q, BIC = bic, fit = I(list(fit))))
+  } else {
+    return(NULL)
+  }
+}
+
+# Run ARIMA re-tuning with fixed best GARCH
+arima_results <- data.frame(p = numeric(), q = numeric(), BIC = numeric(), fit = I(list()))
+m_fixed <- best_garch_order$m
+n_fixed <- best_garch_order$n
+
+for (p in 0:5) {
+  for (q in 0:5) {
+    if (p == 0 && q == 0) next
+    res <- test_arima_with_garch(p, q)
+    if (!is.null(res)) {
+      arima_results <- rbind(arima_results, res)
+    }
+  }
+}
+
+# Select best ARIMA(p,q) with fixed GARCH
+arima_results <- arima_results[order(arima_results$BIC), ]
+final_model <- arima_results$fit[[1]]
+cat("Final ARIMA-GARCH Model: ARIMA(", arima_results$p[1], ",1,", arima_results$q[1], ") - GARCH(", m_fixed, ",", n_fixed, ")\n")
+```
+
+```{r}
+# Extract residuals
+resid_std <- residuals(final_model, standardize = TRUE)
+
+# Ljung-Box tests
+cat("Ljung-Box on standardized residuals:\n")
+print(Box.test(resid_std, lag = 10, type = "Ljung"))
+
+cat("Ljung-Box on squared standardized residuals:\n")
+print(Box.test(resid_std^2, lag = 10, type = "Ljung"))
+```
+Going back to re-run entire process using split training and test data.
+
+```{r}
+# Split data: last 24 months for testing
+split_point <- length(income_ts) - 24
+train_ts <- window(income_ts, end = c(2022, 4))
+test_ts <- window(income_ts, start = c(2022, 5))
+```
+
+## ARIMA model selection on train set
+
+```{r}
+p_values <- 0:3
+q_values <- 0:3
+d_value <- 1
+
+best_model <- NULL
+best_aic <- Inf
+best_params <- c(NA, NA, NA)
+
+for (p in p_values) {
+  for (q in q_values) {
+    model <- tryCatch({
+      arima(train_ts, order = c(p, d_value, q))
+    }, error = function(e) NULL)
+
+    if (!is.null(model) && AIC(model) < best_aic) {
+      best_aic <- AIC(model)
+      best_model <- model
+      best_params <- c(p, d_value, q)
+    }
+  }
+}
+
+cat("Best ARIMA on Train Set: ARIMA(", best_params[1], ",", best_params[2], ",", best_params[3], ")\n")
+```
+
+## ARCH test on ARIMA residuals
+
+```{r}
+arch_test <- ArchTest(residuals(best_model), lags = 12)
+print(arch_test)
+```
+## GARCH Order Selection
+
+```{r}
+test_garch_orders <- function(m, n) {
+  spec <- ugarchspec(
+    variance.model = list(garchOrder = c(m, n)),
+    mean.model = list(armaOrder = c(best_params[1], best_params[3]), include.mean = TRUE),
+    distribution.model = "std"
+  )
+
+  fit <- tryCatch({
+    ugarchfit(spec, data = train_ts, solver = "hybrid")
+  }, error = function(e) NULL)
+
+  if (!is.null(fit)) {
+    bic <- infocriteria(fit)[2]
+    return(data.frame(m = m, n = n, BIC = bic, fit = I(list(fit))))
+  } else {
+    return(NULL)
+  }
+}
+
+# Grid search
+results <- data.frame(m = numeric(), n = numeric(), BIC = numeric(), fit = I(list()))
+for (m in 0:3) {
+  for (n in 0:3) {
+    res <- test_garch_orders(m, n)
+    if (!is.null(res)) {
+      results <- rbind(results, res)
+    }
+  }
+}
+
+results <- results[order(results$BIC), ]
+final_garch <- results$fit[[1]]
+m_fixed <- results$m[1]
+n_fixed <- results$n[1]
+cat("Selected GARCH(", m_fixed, ",", n_fixed, ")\n")
+```
+
+```{r}
+# Step 2: Fix best GARCH(m,n), optimize ARIMA(p,q)
+test_arima_with_garch <- function(p, q) {
+  spec <- ugarchspec(
+    variance.model = list(garchOrder = c(1, 0)),
+    mean.model = list(armaOrder = c(p, q), include.mean = TRUE),
+    distribution.model = "std"
+  )
+  
+  fit <- tryCatch({
+    ugarchfit(spec, data = train_ts, solver = "hybrid")
+  }, error = function(e) NULL)
+  
+  if (!is.null(fit)) {
+    bic <- infocriteria(fit)[2]
+    return(data.frame(p = p, q = q, BIC = bic, fit = I(list(fit))))
+  } else {
+    return(NULL)
+  }
+}
+
+# Run ARIMA re-tuning with fixed best GARCH
+arima_results <- data.frame(p = numeric(), q = numeric(), BIC = numeric(), fit = I(list()))
+m_fixed <- best_garch_order$m
+n_fixed <- best_garch_order$n
+
+for (p in 0:5) {
+  for (q in 0:5) {
+    if (p == 0 && q == 0) next
+    res <- test_arima_with_garch(p, q)
+    if (!is.null(res)) {
+      arima_results <- rbind(arima_results, res)
+    }
+  }
+}
+
+# Select best ARIMA(p,q) with fixed GARCH
+arima_results <- arima_results[order(arima_results$BIC), ]
+final_model <- arima_results$fit[[1]]
+cat("Final ARIMA-GARCH Model: ARIMA(", arima_results$p[1], ",1,", arima_results$q[1], ") - GARCH(", m_fixed, ",", n_fixed, ")\n")
+```
+## Final Model Evaluation
+
+```{r}
+resid_std <- residuals(final_model, standardize = TRUE)
+cat("Ljung-Box on standardized residuals:\n")
+print(Box.test(resid_std, lag = 10, type = "Ljung"))
+cat("Ljung-Box on squared standardized residuals:\n")
+print(Box.test(resid_std^2, lag = 10, type = "Ljung"))
+```
+
+## Forecast and Evaluation
+
+```{r}
+forecast_horizon <- length(test_ts)
+forecast_obj <- ugarchforecast(final_garch, n.ahead = forecast_horizon)
+forecast_mean <- as.numeric(fitted(forecast_obj))
+forecast_sigma <- as.numeric(sigma(forecast_obj))
+
+# Convert test_ts to numeric vector
+test_values <- as.numeric(test_ts)
+
+# Generate date sequence for the forecast period
+start_year <- as.numeric(floor(time(test_ts)[1]))
+start_month <- round(12 * (time(test_ts)[1] - start_year)) + 1
+forecast_dates <- seq(from = as.Date(paste0(start_year, "-", start_month, "-01")),
+                      by = "month", length.out = length(test_values))
+
+# Plot forecast vs. actual
+plot(forecast_dates, test_values, type = "l", col = "black", lwd = 2,
+     main = "Forecast vs Actual (ARIMA-GARCH)",
+     ylab = "Disposable Income", xlab = "Date")
+lines(forecast_dates, forecast_mean, col = "red", lwd = 2)
+lines(forecast_dates, forecast_mean + 1.96 * forecast_sigma, col = "gray", lty = 2)
+lines(forecast_dates, forecast_mean - 1.96 * forecast_sigma, col = "gray", lty = 2)
+legend("topleft", legend = c("Actual", "Forecast", "95% CI"),
+       col = c("black", "red", "gray"), lty = c(1, 1, 2), lwd = 2)
+```
+```{r}
+# Accuracy metrics
+mape <- mean(abs(forecast_mean - test_values) / abs(test_values)) * 100
+pm <- sum((forecast_mean - test_values)^2) / sum((test_values - mean(test_values))^2)
+
+cat("MAPE:", round(mape, 3), "%\n")
+cat("PM:", round(pm, 3), "\n")
+```
